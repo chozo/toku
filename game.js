@@ -9,12 +9,10 @@ const CONFIG = {
   platformW: 220,            // 土台の幅
   hoverGap: 170,             // 揺れているブロックの下端と塔の頂上の距離
   swingAmp: 118,             // 左右の振れ幅
-  swingBase: 2.0,            // 揺れの速さ（rad/s）
-  swingPerBlock: 0.045,      // 1個積むごとに速くなる分
-  swingMax: 4.6,             // ここまでで頭打ち（60個目あたり）
-  swingStepFrom: 61,         // この個数目から、さらに段階的に速くする
+  swingBase: 2.0,            // 揺れの速さ（rad/s）。1〜20個目はこの速さ
+  swingStepFrom: 21,         // この個数目から段階的に速くする
   swingStepEvery: 10,        // 何個ごとに速くするか
-  swingStepRate: 0.08,       // 1段階ごとに速くなる割合（0.08 で 8%）
+  swingStepRate: 0.2,        // 1段階ごとに足す倍率（21個目で1.2倍、31個目で1.4倍…）
   gravity: 2600,
   perfect: 10,               // この距離以内ならぴったり扱いで真上にそろえる
   stickiness: 1.15,          // 重心のずれが「支えの半幅 × この値」を超えると崩れる
@@ -273,6 +271,125 @@ const Sound = {
   whoosh() { this.noise(0.35, { vol: 0.12, freq: 600, q: 1.5, sweep: 4 }); },
 };
 
+// ===== BGM =====
+// ゆっくりした和風の曲（1分間に63拍、16小節で約61秒をくり返す）。
+// 陽音階（レ・ミ・ソ・ラ・シ）で、琴のように弾く旋律と低音、後ろで柔らかく鳴り続ける和音の3つ。
+// 音はすべてその場で合成する。schedule は OfflineAudioContext でも使える（試聴用の書き出し）。
+const Music = {
+  bpm: 63,
+  beats: 64,
+  // [拍, 音（MIDI番号）, 長さ（拍）]
+  melody: [
+    [0, 69, 2], [2, 71, 1], [3, 74, 1], [4, 76, 3], [7, 74, 1], [8, 71, 2], [10, 69, 2], [12, 67, 4],
+    [16, 64, 1.5], [17.5, 67, 0.5], [18, 69, 2], [20, 71, 2], [22, 69, 1], [23, 67, 1], [24, 64, 2], [26, 62, 2], [28, 64, 4],
+    [32, 74, 2], [34, 76, 1], [35, 79, 1], [36, 76, 3], [39, 74, 1], [40, 71, 1], [41, 74, 1], [42, 71, 1], [43, 69, 1], [44, 67, 4],
+    [48, 69, 2], [50, 71, 1], [51, 69, 1], [52, 67, 2], [54, 64, 2], [56, 62, 1.5], [57.5, 64, 0.5], [58, 67, 2], [60, 62, 4],
+  ],
+  // 2小節ごとの和音（低音の根音と、後ろで鳴らす音）
+  chords: [
+    [50, [62, 69]], [43, [62, 67]], [40, [59, 67]], [45, [64, 69]],
+    [50, [62, 69]], [43, [62, 71]], [45, [64, 69]], [50, [57, 62]],
+  ],
+  ac: null, out: null, on: false, timer: 0, t0: 0, next: 0, volume: 0.6,
+
+  hz: m => 440 * Math.pow(2, (m - 69) / 12),
+
+  // 琴のような音（はじいてすぐ減衰する）
+  pluck(ac, dest, f, t, vol, dur = 2.4) {
+    const g = ac.createGain();
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass'; lp.Q.value = 0.7;
+    lp.frequency.setValueAtTime(Math.min(6000, f * 6), t);
+    lp.frequency.exponentialRampToValueAtTime(Math.max(300, f * 1.5), t + dur * 0.6);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(vol * 0.35, t + 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    lp.connect(g).connect(dest);
+    [[1, 'triangle', 1], [2.003, 'sine', 0.35], [3.01, 'sine', 0.12]].forEach(([mul, type, a]) => {
+      const o = ac.createOscillator(), og = ac.createGain();
+      o.type = type; o.frequency.value = f * mul; og.gain.value = a;
+      o.connect(og).connect(lp);
+      o.start(t); o.stop(t + dur + 0.05);
+    });
+  },
+  // 後ろで柔らかく鳴り続ける音
+  pad(ac, dest, f, t, dur, vol) {
+    const g = ac.createGain();
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 900;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + dur * 0.35);
+    g.gain.linearRampToValueAtTime(vol * 0.8, t + dur * 0.7);
+    g.gain.linearRampToValueAtTime(0.0001, t + dur + 0.6);
+    lp.connect(g).connect(dest);
+    [-4, 4].forEach(cents => {
+      const o = ac.createOscillator();
+      o.type = 'triangle'; o.frequency.value = f; o.detune.value = cents;
+      o.connect(lp);
+      o.start(t); o.stop(t + dur + 0.7);
+    });
+  },
+  // 曲の拍 [from, to) にある音を、時刻 start（0拍目の時刻）基準で予約する
+  schedule(ac, dest, start, from, to) {
+    const spb = 60 / this.bpm;
+    const at = b => start + b * spb;
+    for (const [b, m, len] of this.melody) {
+      if (b >= from && b < to) this.pluck(ac, dest, this.hz(m), at(b), 0.16, Math.max(1.6, len * spb * 1.4));
+    }
+    for (let b = Math.ceil(from); b < to; b++) {
+      const [root, pad] = this.chords[Math.floor(b / 8) % this.chords.length];
+      const inBar = b % 4;
+      if (inBar === 0) this.pluck(ac, dest, this.hz(root), at(b), 0.2, 3.2);
+      if (inBar === 2) this.pluck(ac, dest, this.hz(root + 7), at(b), 0.09, 2.2);
+      if (b % 8 === 0) pad.forEach(m => this.pad(ac, dest, this.hz(m), at(b), 8 * spb, 0.035));
+    }
+  },
+  start() {
+    const ac = Sound.ac;
+    if (!ac || this.on) return;
+    if (!this.out) {
+      this.ac = ac;
+      this.out = ac.createGain();
+      this.out.gain.value = 0;
+      this.out.connect(Sound.master);
+    }
+    this.on = true;
+    this.t0 = ac.currentTime + 0.3;
+    this.next = 0;
+    this.out.gain.cancelScheduledValues(ac.currentTime);
+    this.out.gain.setValueAtTime(0, ac.currentTime);
+    this.out.gain.linearRampToValueAtTime(this.volume, ac.currentTime + 3);
+    const tick = () => {
+      // 0.5秒先までの音を予約する。曲の終わりで頭に戻る
+      const spb = 60 / this.bpm;
+      const until = (ac.currentTime + 0.5 - this.t0) / spb;
+      while (this.next < until) {
+        const loop = Math.floor(this.next / this.beats), b = this.next - loop * this.beats;
+        this.schedule(ac, this.out, this.t0 + loop * this.beats * spb, b, b + 1);
+        this.next++;
+      }
+    };
+    tick();
+    this.timer = setInterval(tick, 150);
+  },
+  // 得・特や崩れたときは小さくし、また積みはじめたら戻す
+  duck(on) {
+    if (!this.out) return;
+    const t = this.ac.currentTime;
+    this.out.gain.cancelScheduledValues(t);
+    this.out.gain.setValueAtTime(this.out.gain.value, t);
+    this.out.gain.linearRampToValueAtTime(on ? this.volume * 0.35 : this.volume, t + (on ? 0.3 : 1.5));
+  },
+};
+
+// 画面を離れたら音を止め、戻ったら再開する（スマホで裏に回したときに鳴り続けないように）
+document.addEventListener('visibilitychange', () => {
+  if (!Sound.ac) return;
+  if (document.hidden) Sound.ac.suspend();
+  else Sound.ac.resume();
+});
+
 // ===== 状態 =====
 const S = {
   mode: 'title',       // title | play | collapse | result
@@ -324,10 +441,10 @@ const topY = () => S.tower.length * BH;
 const topX = () => (S.tower.length ? S.tower[S.tower.length - 1].x : W / 2);
 // 次に積む字が何個目か
 const nextNo = () => S.tower.length + 1;
-// 61個目からは10個ごとに一段ずつ速くする
+// 21個目からは10個ごとに一段ずつ速くする（1〜20個目は1.0倍、21〜30個目は1.2倍、31〜40個目は1.4倍…）
 const swingLevel = (k = nextNo()) => k >= CONFIG.swingStepFrom ? Math.floor((k - CONFIG.swingStepFrom) / CONFIG.swingStepEvery) + 1 : 0;
-const swingSpeed = (k = nextNo()) =>
-  Math.min(CONFIG.swingMax, CONFIG.swingBase + CONFIG.swingPerBlock * (k - 1)) * (1 + CONFIG.swingStepRate * swingLevel(k));
+const swingRatio = (k = nextNo()) => 1 + CONFIG.swingStepRate * swingLevel(k);
+const swingSpeed = (k = nextNo()) => CONFIG.swingBase * swingRatio(k);
 function fakeRate(k) {
   let p = 0;
   for (const r of CONFIG.fakeRates) if (k >= r.from) p = r.p;
@@ -513,11 +630,12 @@ function land() {
   // 揺れが一段速くなったら知らせる
   const lv = swingLevel();
   if (lv > 0 && (nextNo() - CONFIG.swingStepFrom) % CONFIG.swingStepEvery === 0) {
-    const msg = lv === 1 ? '揺れが速くなった！' : `揺れがさらに速く！ ×${lv}`;
+    const ratio = `×${+swingRatio().toFixed(1)}`;
+    const msg = lv === 1 ? `揺れが速くなった！ ${ratio}` : `揺れがさらに速く！ ${ratio}`;
     // 名所を越えた瞬間と重なったら、バナーの下に出す
     if (S.banner && S.banner.t === 0) S.banner.extra = msg;
     else floatText(msg, W / 2, topY() + CONFIG.hoverGap * 0.55, '#ffb3a8', 20);
-    emit('speedUp', { level: lv });
+    emit('speedUp', { level: lv, ratio: swingRatio() });
   }
   S.spawnTimer = 0.22;
   updateHud();
@@ -551,6 +669,7 @@ function startPullBack() {
 
 function gameOver(reason, kind, delayCollapse = false) {
   S.mode = 'collapse';
+  Music.duck(true);
   S.reason = reason;
   S.endKind = kind;
   S.resultTimer = delayCollapse ? CONFIG.fakeShowTime + 1.2 : 1.4;
@@ -2082,6 +2201,8 @@ const elResult = document.getElementById('result');
 const elHud = document.getElementById('hud');
 function startGame() {
   Sound.init();
+  Music.start();
+  Music.duck(false);
   elTitle.classList.add('hidden');
   elResult.classList.add('hidden');
   elHud.classList.remove('hidden');
@@ -2114,6 +2235,7 @@ window.addEventListener('keydown', e => {
 window.__game = {
   config: CONFIG,
   milestones: MILESTONES,
+  music: Music,
   altitudeAt, formatAlt, titleAt, stability, fakeRate, swingSpeed,
   // 確認用：n 個積んだ状態から次の字を count 回選んだ結果（'f' = ニセモノ, 't' = 徳）
   sampleKinds: (n, count) => {

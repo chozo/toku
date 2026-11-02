@@ -55,13 +55,16 @@ const playScript = () => {
   const { page, errors } = await open({ width: 360, height: 640 });
   await page.screenshot({ path: out + '01-title.png' });
   await page.click('#btnStart');
+  await page.waitForTimeout(800);
+  const bgm = await page.evaluate(() => { const m = window.__game.music; return { on: m.on, next: m.next }; });
+  ok(bgm.on && bgm.next > 0, `開始するとBGMが鳴りはじめる（予約した拍 ${bgm.next}）`);
   await page.evaluate(playScript);
   await page.evaluate(() => window.__game.setSeed(42));
   const r = await page.evaluate(() => {
     const g = window.__game; const log = [];
     for (let i = 0; i < 22; i++) log.push(g.placeNext(0));
     const ev = g.drainEvents();
-    return { ups: ev.filter(e => e.type === 'titleUp').map(e => e.title), log, count: g.state().count, passed: ev.filter(e => e.type === 'passed').length, ms: ev.filter(e => e.type === 'milestone').map(e => e.name) };
+    return { ups: ev.filter(e => e.type === 'titleUp').map(e => e.title), speedUps: ev.filter(e => e.type === 'speedUp').map(e => e.ratio), log, count: g.state().count, passed: ev.filter(e => e.type === 'passed').length, ms: ev.filter(e => e.type === 'milestone').map(e => e.name) };
   });
   ok(r.count === 22, `ぴったり積んで22個（実際 ${r.count}）`);
   ok(r.passed > 0, `ニセモノを見送った回数 ${r.passed}`);
@@ -83,9 +86,9 @@ const playScript = () => {
   const want = { 11: 0.10, 21: 0.15, 31: 0.20, 41: 0.25, 51: 0.30, 81: 0.30 };
   const rateOk = Object.entries(want).every(([k, p]) => Math.abs(kinds[k].rate - p) < 0.015);
   ok(rateOk, `得・特の率 ${Object.entries(want).map(([k]) => `${k}個目 ${(kinds[k].rate * 100).toFixed(1)}%`).join(' / ')}`);
-  const sp = await page.evaluate(() => { const g = window.__game; return [59, 60, 61, 70, 71, 81, 100].map(k => +g.swingSpeed(k).toFixed(2)); });
-  ok(sp[1] === sp[0] && sp[2] > sp[1] && sp[3] === sp[2] && sp[4] > sp[3] && sp[5] > sp[4] && sp[6] > sp[5],
-    `61個目から10個ごとに揺れが速くなる（59:${sp[0]} 60:${sp[1]} 61:${sp[2]} 70:${sp[3]} 71:${sp[4]} 81:${sp[5]} 100:${sp[6]}）`);
+  // 揺れの速さ：1〜20個目は1.0倍、そこから10個ごとに0.2倍ずつ速くなる
+  const sp = await page.evaluate(() => { const g = window.__game, b = g.swingSpeed(1); return [1, 20, 21, 30, 31, 41, 51, 61, 71, 81, 91, 101].map(k => `${k}:${+(g.swingSpeed(k) / b).toFixed(2)}`).join(' '); });
+  ok(sp === '1:1 20:1 21:1.2 30:1.2 31:1.4 41:1.6 51:1.8 61:2 71:2.2 81:2.4 91:2.6 101:2.8', `揺れの速さの倍率 ${sp}`);
   // 1個あたりの伸びは小さくならない（区間の平均が下がるエベレスト→旅客機の43個目だけは例外）
   const alt = await page.evaluate(() => {
     const g = window.__game, drops = [];
@@ -97,6 +100,7 @@ const playScript = () => {
   });
   ok(alt.drops.join() === '43', `1個あたりの伸びが小さくなる所 ${alt.drops.join('、')}（43個目だけのはず）`);
   ok(alt.house === '8 m' && alt.five === 1.875, `家は${alt.house}、5個目の伸び ${alt.five} m`);
+  ok(r.speedUps.join() === '1.2', `20個積むと揺れが1.2倍になったと知らせる（${r.speedUps.join('、')}）`);
   ok(r.ups.join() === '煩悩の塊,普通の人', `積む途中で称号が上がる：${r.ups.join('、')}`);
   ok(r.ms.includes('東京タワー'), `名所：${r.ms.join('、')}`);
   await page.evaluate(() => window.__game.step(1 / 60, 30));
