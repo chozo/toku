@@ -1,0 +1,21 @@
+{
+  "name": "toku",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node tools/serve.mjs",
+    "check": "node --check game.js",
+    "e2e": "node tools/e2e.mjs",
+    "shots:landmarks": "node tools/shots-landmarks.mjs",
+    "favicon": "node tools/make-favicon.mjs",
+    "ogp": "node tools/ogp/make-ogp.mjs",
+    "build": "node tools/build-dist.mjs",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1",
+    "wrangler": "^4.156.2"
+  }
+}
