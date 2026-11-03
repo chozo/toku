@@ -131,6 +131,7 @@ npm run favicon    # favicon を作り直す（public/favicon.png と favicon.sv
 npm run ogp        # OGP 画像を作り直す（public/ogp.png）
 npm run build      # 公開用ファイルを dist/toku/ に書き出す
 npm run deploy     # ビルドして Cloudflare に公開
+npm run promo      # 告知動画を作る（../video/toku-promo.mp4）
 ```
 
 - 依存なしの HTML / CSS / JavaScript（Canvas）。
@@ -138,7 +139,7 @@ npm run deploy     # ビルドして Cloudflare に公開
 - favicon はプレイ中と同じ立体の「徳」で、背景は透過。`npm run favicon` で、ゲームの字の描き方（`glyphSprites` と `drawBlock` と同じ重ね方）から `public/favicon.png`（192×192）と、それを埋め込んだ `public/favicon.svg` を書き出す。字の見た目を変えたら作り直す。
 - OGP 画像は `public/ogp.png`（1200×630）。左にタイトル・副題・遊び方・URL（game.chozo.net/toku）、右にゲーム画面（東京タワーの手前で「特」が揺れている場面）を置く。`npm run ogp` で、ゲームを確認用の入口で進めて撮り、HTML に重ねて書き出す（乱数を固定しているので毎回同じ絵になる）。favicon の画像をロゴの「徳」に使うので、favicon を作り直したら OGP も作り直す。
 - 公開URLは `https://game.chozo.net/toku/`。`index.html` の `og:url` と `og:image` はこの URL の絶対パスにしている。
-- 確認用の入口 `window.__game`：`state()`、`start()`、`drop()`、`manual(true)` と `step(dt, n)`（1コマずつ進める）、`forceNext('fake' | 'toku')`、`buildTower(n)`、`setSeed(n)`、`drainEvents()`、`fakeRate(k)`／`swingSpeed(k)`（k 個目の率と速さ）、`sampleKinds(n, count)`（次の字の選ばれ方を調べる）。`state()` は引いたカメラの倍率（`zoom`）と、崩れた徳の数・止まった数（`debris` / `settled`）も返す。
+- 確認用の入口 `window.__game`：`state()`、`start()`、`drop()`、`manual(true)` と `step(dt, n)`（1コマずつ進める）、`forceNext('fake' | 'toku')`、`buildTower(n)`、`setSeed(n)`、`drainEvents()`、`fakeRate(k)`／`swingSpeed(k)`（k 個目の率と速さ）、`sampleKinds(n, count)`（次の字の選ばれ方を調べる）、`autoDrop(opts)`（撮影用）、`audio`（撮影用の音の記録）、`sound`（効果音そのもの）。`state()` は引いたカメラの倍率（`zoom`）と、崩れた徳の数・止まった数（`debris` / `settled`）も返す。
 
 ## 素材
 
@@ -150,6 +151,17 @@ npm run deploy     # ビルドして Cloudflare に公開
   - 音量は `Music.volume`（効果音より一段小さい）。旋律は `Music.melody`、和音は `Music.chords`。
   - 画面を離れる（スマホで別のアプリに切り替えるなど）と音を止め、戻ると再開する。
 - フォント：Google Fonts の Dela Gothic One（立体文字）、Yuji Syuku、Zen Maru Gothic（いずれも SIL Open Font License）。読み込めない場合は端末のゴシック体・明朝体で表示する。
+
+## 告知動画
+
+- `npm run promo` で、縦型（1080×1920・30fps）約31秒の告知動画を `../video/toku-promo.mp4` に書き出す。表紙は `toku-promo-cover.jpg`、2秒おきの一覧は `toku-promo-sheet.jpg`。動画はリポジトリに含めない。
+- 台本は `tools/promo/scenario.js`、見た目は `tools/promo/promo.css`。撮影と書き出しは `tools/promo/record.mjs` と `stage.js`（ヘッドレス Chrome でゲームを1コマずつ進めて撮る）。
+- 構成：月の高さで「月超え！」→ タイトル → タップで積む（×3 早送り）→「得」「特」を見送る → 東京タワー・富士山・宇宙ステーション・土星・アンドロメダを次々に越える → 「得」を積んで即終了（崩れてカメラが引く）→ エンドカード（URL と QR コード）。
+- 字幕・エンドカードでは称号に触れない（ゲーム画面のバナーに映るのはよい）。
+- 音はゲームの効果音と BGM（`Music`）を書き出し時に合成し、-14 LUFS にそろえる。外部の音源は使っていない。
+- エンドカードの QR コードは `tools/promo/qr.png`（https://game.chozo.net/toku/ 、`qrcode` パッケージで作成）。
+- `PROMO_EVERY=15 npm run promo` で15コマおきに撮って構成だけ確かめられる（`../video/toku-promo-preview.jpg`）。音だけ直すときは `PROMO_ENCODE_ONLY=1 npm run promo`（撮り直さない）。
+- 撮影用の入口（`window.__game`）：`audio.capture` / `drain` / `render` / `resync`（効果音と BGM の呼び出しを記録して書き出し時に鳴らす）、`autoDrop({ offset, fake })`（狙った位置を通り過ぎた瞬間に落とす）。ふだんの遊び方には影響しない。
 
 ## 公開
 

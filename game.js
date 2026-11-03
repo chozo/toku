@@ -193,7 +193,7 @@ function setSeed(s) {
 
 // ===== 音（Web Audio で合成） =====
 const Sound = {
-  ac: null, master: null, enabled: true,
+  ac: null, master: null, enabled: true, at: undefined,
   init() {
     if (this.ac) { if (this.ac.state === 'suspended') this.ac.resume(); return; }
     try {
@@ -205,7 +205,7 @@ const Sound = {
   },
   tone(freq, dur, { type = 'sine', vol = 0.3, attack = 0.003, delay = 0, slide = 0 } = {}) {
     if (!this.ac || !this.enabled) return;
-    const t0 = this.ac.currentTime + delay;
+    const t0 = (this.at ?? this.ac.currentTime) + delay;
     const o = this.ac.createOscillator();
     const g = this.ac.createGain();
     o.type = type;
@@ -219,7 +219,7 @@ const Sound = {
   },
   noise(dur, { vol = 0.3, freq = 800, q = 1, type = 'bandpass', delay = 0, sweep = 0 } = {}) {
     if (!this.ac || !this.enabled) return;
-    const t0 = this.ac.currentTime + delay;
+    const t0 = (this.at ?? this.ac.currentTime) + delay;
     const len = Math.ceil(this.ac.sampleRate * dur);
     const buf = this.ac.createBuffer(1, len, this.ac.sampleRate);
     const d = buf.getChannelData(0);
@@ -380,6 +380,75 @@ const Music = {
     this.out.gain.cancelScheduledValues(t);
     this.out.gain.setValueAtTime(this.out.gain.value, t);
     this.out.gain.linearRampToValueAtTime(on ? this.volume * 0.35 : this.volume, t + (on ? 0.3 : 1.5));
+  },
+};
+
+// 撮影用：効果音と BGM の呼び出しを記録し、あとで OfflineAudioContext に同じ音を鳴らす
+const SOUND_NAMES = ['moku', 'rin', 'fanfare', 'buzzer', 'crash', 'thud', 'stamp', 'whoosh'];
+const Capture = { on: false, queue: [], depth: 0, ducked: false, renders: new WeakMap() };
+for (const name of SOUND_NAMES) {
+  const fn = Sound[name];
+  Sound[name] = function (...args) {
+    if (Capture.on && Capture.depth === 0) { Capture.queue.push({ name, args }); return; }
+    Capture.depth++;
+    try { return fn.apply(this, args); } finally { Capture.depth--; }
+  };
+}
+{
+  const start = Music.start, duck = Music.duck;
+  Music.start = function () {
+    if (Capture.on) { if (!this.on) { this.on = true; Capture.queue.push({ name: 'bgm', args: [] }); } return; }
+    return start.call(this);
+  };
+  Music.duck = function (on) {
+    if (Capture.on) { Capture.ducked = on; Capture.queue.push({ name: 'bgmDuck', args: [on] }); return; }
+    return duck.call(this, on);
+  };
+}
+const SoundCapture = {
+  capture(on) { Capture.on = on; },
+  drain() { return Capture.queue.splice(0); },
+  // 撮らずに進めた区間のあとに、BGM の今の状態（流れているか・小さくしているか）を記録し直す
+  resync() { if (Capture.on) Capture.queue.push({ name: 'state', args: [{ on: Music.on, ducked: Capture.ducked }] }); },
+  videoGain: 1.3, // 動画では BGM をゲームより少し大きく
+  render(ctx, name, args, when) {
+    let r = Capture.renders.get(ctx);
+    if (!r) {
+      const master = ctx.createGain();
+      master.gain.value = 0.55;
+      master.connect(ctx.destination);
+      r = { master, bgm: null };
+      Capture.renders.set(ctx, r);
+    }
+    const level = ducked => Music.volume * this.videoGain * (ducked ? 0.35 : 1);
+    const startBgm = (t, ducked) => {
+      r.bgm = ctx.createGain();
+      r.bgm.gain.setValueAtTime(0, t);
+      r.bgm.gain.linearRampToValueAtTime(level(ducked), t + 1.5);
+      r.bgm.connect(r.master);
+      const spb = 60 / Music.bpm, end = ctx.length / ctx.sampleRate;
+      for (let loop = 0; t + loop * Music.beats * spb < end; loop++) {
+        Music.schedule(ctx, r.bgm, t + loop * Music.beats * spb, 0, Music.beats);
+      }
+    };
+    const setLevel = (t, ducked) => {
+      r.bgm.gain.cancelScheduledValues(t);
+      r.bgm.gain.setValueAtTime(r.bgm.gain.value, t);
+      r.bgm.gain.linearRampToValueAtTime(level(ducked), t + (ducked ? 0.3 : 1.5));
+    };
+    if (name === 'bgm') { if (!r.bgm) startBgm(when, false); return; }
+    if (name === 'bgmDuck') { if (r.bgm) setLevel(when, args[0]); return; }
+    if (name === 'state') {
+      const st = args[0] || {};
+      if (st.on && !r.bgm) startBgm(when, st.ducked);
+      else if (r.bgm) setLevel(when, st.ducked);
+      return;
+    }
+    // 効果音：Sound の出力先と時刻をこの ctx に差し替えて鳴らす
+    const keep = { ac: Sound.ac, master: Sound.master, enabled: Sound.enabled, at: Sound.at };
+    Object.assign(Sound, { ac: ctx, master: r.master, enabled: true, at: when });
+    Capture.depth++;
+    try { Sound[name](...args); } finally { Capture.depth--; Object.assign(Sound, keep); }
   },
 };
 
@@ -828,7 +897,14 @@ function update(dt) {
         c.x = W / 2 + CONFIG.swingAmp * Math.sin(S.phase);
         c.y = topY() + CONFIG.hoverGap;
         c.yaw = 0.45 * Math.sin(S.t * 1.7);
-        if (c.fake && c.t >= c.life) {
+        // 撮影用：狙った位置（塔の上端の中心＋offset）を通り過ぎた瞬間に落とす
+        const ad = S.autoDrop;
+        if (ad && (!c.fake || ad.fake) && c.t > (ad.after ?? 0.3) && c.prevX !== undefined) {
+          const target = topX() + (ad.offset || 0);
+          if ((c.prevX - target) * (c.x - target) <= 0) { c.prevX = undefined; drop(); }
+        }
+        if (S.cur === c && c.state === 'swing') c.prevX = c.x;
+        if (c.state === 'swing' && c.fake && c.t >= c.life) {
           c.state = 'leave';
           Sound.whoosh();
           floatText('見送った！', c.x, c.y + BH + 10, '#bff7c4', 20);
@@ -2270,7 +2346,10 @@ window.__game = {
   manual: on => { manual = on; },
   step: (dt = 1 / 60, n = 1) => { for (let i = 0; i < n; i++) update(dt); render(); },
   drainEvents: () => events.splice(0),
-  audio: Sound,
+  audio: SoundCapture,
+  sound: Sound,
+  // 撮影用：狙った位置で自動で落とす（{ offset, fake, after }。null で止める）
+  autoDrop: opts => { S.autoDrop = opts || null; },
   // 確認用：塔を n 個の徳で一気に作る
   buildTower: (n, jitter = 0) => {
     S.tower = Array.from({ length: n }, () => ({ x: W / 2 + (rand() - 0.5) * jitter, ch: '徳', fake: false }));
